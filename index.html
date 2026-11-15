@@ -143,6 +143,12 @@
   .setup { background: var(--card); border-radius: 18px; padding: 4px 16px 16px; margin-top: 14px; }
   .setup h2 { margin-top: 16px; }
   .chip.compact { padding: 5px 11px; font-size: .85rem; }
+  /* Teaching materials grouped under a small heading (language or grade) */
+  .tm-heading { font-size: .85rem; color: var(--muted); margin: 14px 0 6px; }
+  .tm-heading::before { content: "▸ "; }
+  .chip .tm-meta { display: block; font-size: .75rem; color: var(--muted); font-weight: 400; }
+  .chip.tm { border-radius: 14px; text-align: left; padding: 8px 14px; }
+  .grouping { display: flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); margin-top: 6px; }
   details.topics { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
   details.topics summary { color: var(--muted); font-size: .9rem; cursor: pointer; }
   details.topics .chips { margin-top: 10px; }
@@ -218,11 +224,24 @@
       <button class="link" id="openStatisticsButton">Statistik ansehen →</button>
     </div>
 
-    <!-- Whole selection on one card, in the order it is decided -->
-    <div class="setup" id="setupCard">
-      <h2>Sprache</h2>
-      <div class="chips" id="languageChips"></div>
+    <!-- Screen 1 of the selection: level, then teaching material -->
+    <div class="setup" id="teachingMaterialCard">
+      <div id="levelBlock">
+        <h2>Klasse</h2>
+        <div class="chips" id="levelChips"></div>
+      </div>
+      <h2>Lehrmittel</h2>
+      <div class="grouping">Gruppiert nach <span class="chips" id="groupingChips"></span></div>
+      <div id="teachingMaterialList"></div>
+    </div>
+    <p class="sub" id="noWordsNotice"></p>
+  </section>
 
+  <!-- ===== Screen 2 of the selection: group, direction, mode, pool, topics ===== -->
+  <section id="setupScreen" class="hidden">
+    <div class="stepbar"><button class="link" data-back="homeScreen">← Lehrmittel</button><span id="setupStepLabel"></span></div>
+    <h1 id="setupTitle"></h1>
+    <div class="setup">
       <h2>Gruppe</h2>
       <div class="chips" id="groupChips"></div>
 
@@ -245,7 +264,6 @@
       <p class="stats" id="selectionSummary"></p>
       <button class="btn" id="startButton">Los geht's</button>
     </div>
-    <p class="sub" id="noWordsNotice"></p>
   </section>
 
   <!-- ===== Quiz ===== -->
@@ -332,7 +350,7 @@
    0) CONFIGURATION – the only line to adapt
    Paste the web app URL of your Apps Script deployment (ends in /exec).
    ===================================================================== */
-const API_URL = "https://script.google.com/macros/s/AKfycbw2iw0asU9emTvG1I8OJUEk1oPTS-eUGwbnWs0fYCKl4gNvISTmRbRFPrMOG3pub_8pnw/exec";
+const API_URL = "HIER_DEINE_EXEC_URL_EINFÜGEN";
 
 /* =====================================================================
    1) SERVER CONNECTION
@@ -413,14 +431,18 @@ function forgetSession() {
    ===================================================================== */
 const state = {
   profile: null,              // { name, emoji }
-  languages: [],              // [{ name, speechCode }]
-  allWords: [],               // [{ id, language, group, topic, foreign, german }]
+  languages: [],              // [{ name, speechCode }] – only for read-aloud
+  levels: [],                 // visible school levels: [{ name, fromGrade, toGrade }]
+  teachingMaterials: [],      // visible teaching materials: [{ name, language, grade, level }]
+  allWords: [],               // [{ id, teachingMaterial, language, group, topic, foreign, german }]
   progressByWordId: {},
   groups: [],                 // master data from sheet "Gruppen": [{ language, group, displayOrder }]
   statistics: null,
   streakNeededToCountAsLearned: 3,
-  // Selection on the home screen, in the order it is decided:
-  language: null,
+  // Selection, in the order it is decided (screen 1: level + teaching material, screen 2: the rest):
+  level: null,
+  teachingMaterial: null,
+  teachingMaterialGrouping: "language",
   group: null,
   direction: "foreign-de",
   mode: "flashcard",
@@ -430,7 +452,7 @@ const state = {
 };
 
 const el = id => document.getElementById(id);
-const ALL_SCREENS = ["loadingScreen", "loginScreen", "pinScreen", "profileScreen", "homeScreen",
+const ALL_SCREENS = ["loadingScreen", "loginScreen", "pinScreen", "profileScreen", "homeScreen", "setupScreen",
   "quizScreen", "resultScreen", "statisticsScreen"];
 
 function showScreen(screenId) {
@@ -460,8 +482,10 @@ document.querySelectorAll("[data-back]").forEach(button => {
 function isLearned(word) {
   return (state.progressByWordId[word.id]?.streak || 0) >= state.streakNeededToCountAsLearned;
 }
-function wordsOfLanguage(language) { return state.allWords.filter(w => w.language === language); }
-function wordsOfGroup() { return wordsOfLanguage(state.language).filter(w => w.group === state.group); }
+function wordsOfTeachingMaterial(name) { return state.allWords.filter(w => w.teachingMaterial === name); }
+function wordsOfGroup() { return wordsOfTeachingMaterial(state.teachingMaterial).filter(w => w.group === state.group); }
+function currentTeachingMaterial() { return state.teachingMaterials.find(tm => tm.name === state.teachingMaterial) || null; }
+function currentLanguage() { return currentTeachingMaterial()?.language || ""; }
 function topicsOfGroup() { return [...new Set(wordsOfGroup().map(w => w.topic))]; }
 function hasRealTopics() { return topicsOfGroup().some(topic => topic !== ""); }
 function wordsInSelectedTopics() {
@@ -469,9 +493,9 @@ function wordsInSelectedTopics() {
   return hasRealTopics() ? wordsOfGroup().filter(w => state.selectedTopics.has(w.topic)) : wordsOfGroup();
 }
 function uniqueInOrder(values) { return [...new Set(values)]; }
-function groupsOfLanguage(language) {
-  const groupsWithWords = uniqueInOrder(wordsOfLanguage(language).map(w => w.group));
-  const orderedByMasterData = state.groups.filter(g => g.language === language).map(g => g.group);
+function groupsOfTeachingMaterial(name) {
+  const groupsWithWords = uniqueInOrder(wordsOfTeachingMaterial(name).map(w => w.group));
+  const orderedByMasterData = state.groups.filter(g => g.teachingMaterial === name).map(g => g.group);
   return [...orderedByMasterData.filter(group => groupsWithWords.includes(group)),
           ...groupsWithWords.filter(group => !orderedByMasterData.includes(group))];
 }
@@ -593,7 +617,7 @@ function renderProfileOverview(overview) {
     const tile = document.createElement("button");
     tile.className = "profile";
     tile.innerHTML = `<span class="emoji"></span><span class="name"></span>
-      <span class="count">${profile.learnedWordCount} / ${overview.totalWordCount} gelernt</span>
+      <span class="count">${profile.learnedWordCount} / ${profile.visibleWordCount} gelernt</span>
       <span class="count">heute ${profile.todayCorrectWords} richtig${profile.dayStreak ? " · 🔥" + profile.dayStreak : ""}</span>`;
     tile.querySelector(".emoji").textContent = profile.emoji;
     tile.querySelector(".name").textContent = profile.name;
@@ -620,13 +644,9 @@ function applyProfileData(profile, profileData) {
   state.statistics = profileData.statistics;
   state.groups = profileData.groups || [];
   state.streakNeededToCountAsLearned = profileData.streakNeededToCountAsLearned;
-  // Languages that have words but aren't in "Sprachen" still appear (just without read-aloud).
-  const knownLanguageNames = profileData.languages.map(l => l.name);
-  const languagesWithWords = uniqueInOrder(state.allWords.map(w => w.language));
-  state.languages = [
-    ...profileData.languages.filter(l => languagesWithWords.includes(l.name)),
-    ...languagesWithWords.filter(name => !knownLanguageNames.includes(name)).map(name => ({ name, speechCode: "" }))
-  ];
+  state.languages = profileData.languages;
+  state.levels = profileData.levels;
+  state.teachingMaterials = profileData.teachingMaterials;
   el("activeProfileTitle").textContent = `${profile.emoji} ${profile.name}`;
   restoreSelection();
 }
@@ -654,16 +674,21 @@ function renderMotivationCard() {
 el("openStatisticsButton").onclick = renderStatisticsScreen;
 
 /* =====================================================================
-   6) HOME: SELECTION IN ONE STEP
-   Language → group → direction → mode → pool → topics, all on one card.
-   Every change re-renders the card, so dependent choices (groups of a
-   language, topics of a group) always fit. The last selection is
-   remembered per profile in this browser, so a child just taps "Los".
+   6) SELECTION
+   Screen 1 (home): level (pre-selected from last time) and teaching
+   material, grouped by language or grade – the user picks the grouping.
+   Screen 2: group, direction, mode, pool, topics.
+   The last selection is remembered per profile in this browser.
    ===================================================================== */
 const SELECTION_STORAGE_PREFIX = "vokabeltrainer-auswahl-";
-const REMEMBERED_SELECTION_KEYS = ["language", "group", "direction", "mode", "pool"];
+const REMEMBERED_SELECTION_KEYS = ["level", "teachingMaterial", "teachingMaterialGrouping", "group", "direction", "mode", "pool"];
+
+/* Start values, so a sibling logging in on the same device never inherits the previous selection. */
+const DEFAULT_SELECTION = { level: null, teachingMaterial: null, teachingMaterialGrouping: "language",
+  group: null, direction: "foreign-de", mode: "flashcard", pool: "all" };
 
 function restoreSelection() {
+  Object.assign(state, DEFAULT_SELECTION);
   let rememberedSelection = {};
   try { rememberedSelection = JSON.parse(localStorage.getItem(SELECTION_STORAGE_PREFIX + state.profile.name)) || {}; } catch { /* none */ }
   REMEMBERED_SELECTION_KEYS.forEach(key => { if (rememberedSelection[key]) state[key] = rememberedSelection[key]; });
@@ -675,45 +700,106 @@ function rememberSelection() {
   try { localStorage.setItem(SELECTION_STORAGE_PREFIX + state.profile.name, JSON.stringify(selectionToRemember)); } catch { /* memory only */ }
 }
 
-/* Keeps language/group/topics valid, e.g. after words were removed from the sheet
-   or the language changed. resetTopics: select all topics of the (new) group. */
+/* Keeps the selection valid when the sheet changed (other assignment,
+   removed words). resetTopics: select all topics of the (new) group. */
 function repairSelection(resetTopics) {
-  const languageNames = state.languages.map(l => l.name);
-  if (!languageNames.includes(state.language)) { state.language = languageNames[0] || null; resetTopics = true; }
-  const groupNames = state.language ? groupsOfLanguage(state.language) : [];
+  const levelNames = state.levels.map(level => level.name);
+  if (!levelNames.includes(state.level)) state.level = levelNames[0] || null;
+  if (!currentTeachingMaterial()) { state.teachingMaterial = null; resetTopics = true; }
+  const groupNames = state.teachingMaterial ? groupsOfTeachingMaterial(state.teachingMaterial) : [];
   if (!groupNames.includes(state.group)) { state.group = groupNames[0] || null; resetTopics = true; }
   if (resetTopics) state.selectedTopics = new Set(state.group ? topicsOfGroup() : []);
 }
 
-function buildSingleChoiceChips(containerId, options, stateKey, onChange) {
+function buildSingleChoiceChips(containerId, options, stateKey, onChange, extraClass = "") {
   const container = el(containerId);
   container.innerHTML = "";
   options.forEach(([value, label]) => {
     const chip = document.createElement("button");
-    chip.className = "chip" + (state[stateKey] === value ? " on" : "");
+    chip.className = ("chip " + extraClass).trim() + (state[stateKey] === value ? " on" : "");
     chip.textContent = label;
     chip.onclick = () => { state[stateKey] = value; onChange(value); };
     container.appendChild(chip);
   });
 }
 
+function gradeLabel(grade) { return `${grade}. Klasse`; }
+
+/* ----- Screen 1: level + teaching material ----- */
 function renderHomeScreen() {
   renderMotivationCard();
-  const hasWords = state.languages.length > 0;
-  el("setupCard").classList.toggle("hidden", !hasWords);
-  el("noWordsNotice").textContent = hasWords ? "" : "Noch keine Wörter im Blatt «Vokabeln».";
-  if (hasWords) renderSetupCard();
+  const hasTeachingMaterials = state.teachingMaterials.length > 0;
+  el("teachingMaterialCard").classList.toggle("hidden", !hasTeachingMaterials);
+  el("noWordsNotice").textContent = hasTeachingMaterials ? ""
+    : "Dir ist noch kein Lehrmittel zugewiesen. Bitte Eltern fragen (Blatt «Zuweisung»).";
+  if (hasTeachingMaterials) renderTeachingMaterialCard();
   showScreen("homeScreen");
+}
+
+function renderTeachingMaterialCard() {
+  const rerender = () => { rememberSelection(); renderTeachingMaterialCard(); };
+
+  // Only one level visible → nothing to choose, so the row is hidden.
+  el("levelBlock").classList.toggle("hidden", state.levels.length <= 1);
+  buildSingleChoiceChips("levelChips", state.levels.map(level => [level.name, level.name]), "level", rerender);
+  buildSingleChoiceChips("groupingChips", [["language", "Sprache"], ["grade", "Klasse"]],
+    "teachingMaterialGrouping", rerender, "compact");
+
+  const teachingMaterialsOfLevel = state.teachingMaterials.filter(tm => tm.level === state.level);
+  const groupedByGrade = state.teachingMaterialGrouping === "grade";
+  const headingOf = tm => groupedByGrade ? gradeLabel(tm.grade) : tm.language;
+  // Grade headings ascending; language headings in sheet order.
+  const headings = uniqueInOrder((groupedByGrade
+    ? [...teachingMaterialsOfLevel].sort((first, second) => first.grade - second.grade)
+    : teachingMaterialsOfLevel).map(headingOf));
+
+  const list = el("teachingMaterialList");
+  list.innerHTML = "";
+  headings.forEach(heading => {
+    const headingElement = document.createElement("div");
+    headingElement.className = "tm-heading";
+    headingElement.textContent = heading;
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    teachingMaterialsOfLevel.filter(tm => headingOf(tm) === heading).forEach(tm => {
+      const chip = document.createElement("button");
+      chip.className = "chip tm" + (tm.name === state.teachingMaterial ? " on" : "");
+      // The attribute that isn't the heading goes into the label, e.g. "English File (7. Kl)".
+      chip.textContent = groupedByGrade ? `${tm.name} (${tm.language})` : `${tm.name} (${tm.grade}. Kl)`;
+      const meta = document.createElement("span");
+      meta.className = "tm-meta";
+      meta.textContent = learnedLabel(wordsOfTeachingMaterial(tm.name));
+      chip.appendChild(meta);
+      chip.onclick = () => {
+        if (tm.name !== state.teachingMaterial) { state.teachingMaterial = tm.name; state.group = null; }
+        repairSelection(false);
+        rememberSelection();
+        renderSetupScreen();
+      };
+      chips.appendChild(chip);
+    });
+    list.append(headingElement, chips);
+  });
+}
+
+/* ----- Screen 2: group, direction, mode, pool, topics ----- */
+function renderSetupScreen() {
+  const teachingMaterial = currentTeachingMaterial();
+  if (!teachingMaterial) { renderHomeScreen(); return; }
+  el("setupTitle").textContent = teachingMaterial.name;
+  el("setupStepLabel").textContent = `${teachingMaterial.language} · ${gradeLabel(teachingMaterial.grade)}`;
+  renderSetupCard();
+  showScreen("setupScreen");
 }
 
 function renderSetupCard() {
   const changeAndRerender = (resetTopics) => () => { repairSelection(resetTopics); rememberSelection(); renderSetupCard(); };
+  const language = currentLanguage();
 
-  buildSingleChoiceChips("languageChips", state.languages.map(l => [l.name, l.name]), "language", changeAndRerender(true));
-  buildSingleChoiceChips("groupChips", groupsOfLanguage(state.language).map(group => [group, group]), "group", changeAndRerender(true));
+  buildSingleChoiceChips("groupChips", groupsOfTeachingMaterial(state.teachingMaterial).map(group => [group, group]), "group", changeAndRerender(true));
   buildSingleChoiceChips("directionChips", [
-    ["foreign-de", `${state.language} → Deutsch`],
-    ["de-foreign", `Deutsch → ${state.language}`],
+    ["foreign-de", `${language} → Deutsch`],
+    ["de-foreign", `Deutsch → ${language}`],
     ["mixed", "Gemischt"]
   ], "direction", changeAndRerender(false));
   buildSingleChoiceChips("modeChips",
@@ -725,13 +811,12 @@ function renderSetupCard() {
   el("modeHint").textContent = {
     flashcard: "Du schaust die Antwort an und sagst selbst, ob du sie wusstest.",
     choice: "Wähle aus 4 Antworten die richtige.",
-    typing: `Du siehst das deutsche Wort und schreibst es auf ${state.language}.`
+    typing: `Du siehst das deutsche Wort und schreibst es auf ${language}.`
   }[state.mode];
 
   renderTopicChips();
-  const selectedWords = wordsInSelectedTopics();
   el("selectionSummary").textContent =
-    `${learnedLabel(selectedWords)} · ${wordsForCurrentSelection().length} Wörter in dieser Runde`;
+    `${learnedLabel(wordsInSelectedTopics())} · ${wordsForCurrentSelection().length} Wörter in dieser Runde`;
 }
 
 /* Topics: collapsed by default, the summary line says what is selected. */
@@ -819,7 +904,7 @@ function startSession(words) {
     answeredIds: new Set(),
     pendingSaves: []
   };
-  el("typedAnswer").placeholder = `Auf ${state.language} eintippen…`;
+  el("typedAnswer").placeholder = `Auf ${currentLanguage()} eintippen…`;
   showScreen("quizScreen");
   showNextQuestion();
 }
@@ -903,7 +988,8 @@ function renderChoices() {
   const { word, direction } = currentQuestion();
   const answerSide = direction === "foreign-de" ? "german" : "foreign";
   const sameLanguage = state.allWords.filter(w => w.language === word.language && w.id !== word.id);
-  const closeness = w => (w.group === word.group ? 2 : 0) + (w.topic === word.topic ? 1 : 0);
+  // Prefer distractors from the same teaching material, then group, then topic.
+  const closeness = w => (w.teachingMaterial === word.teachingMaterial ? 4 : 0) + (w.group === word.group ? 2 : 0) + (w.topic === word.topic ? 1 : 0);
   // Shuffle first, then stable-sort by closeness: closest words win, ties stay random.
   const distractors = shuffled(sameLanguage)
     .sort((a, b) => closeness(b) - closeness(a))
@@ -1043,10 +1129,10 @@ async function refreshStatisticsAfterRound() {
 
 el("repeatSelectionButton").onclick = () => {
   const words = wordsForCurrentSelection();
-  words.length ? startSession(words) : renderHomeScreen();
+  words.length ? startSession(words) : renderSetupScreen();
 };
 el("backToStartButton").onclick = renderHomeScreen;
-el("quitButton").onclick = renderHomeScreen;
+el("quitButton").onclick = renderSetupScreen;
 
 /* =====================================================================
    10) STATISTICS SCREEN
@@ -1078,22 +1164,22 @@ function renderStatisticsScreen() {
   showScreen("statisticsScreen");
 }
 
-/* One card per language. Segment width ∝ words in the group (flex-grow),
+/* One card per teaching material. Segment width ∝ words in the group (flex-grow),
    fill inside ∝ learned words. Same hue everywhere – the groups are told
    apart by position and the legend, not by colour. */
 function renderGroupProgress(groupProgress) {
   const list = el("groupProgressList");
   list.innerHTML = "";
-  uniqueInOrder(groupProgress.map(entry => entry.language)).forEach(language => {
-    const languageGroups = groupProgress.filter(entry => entry.language === language);
-    const totalWords = languageGroups.reduce((sum, entry) => sum + entry.wordCount, 0);
-    const totalLearned = languageGroups.reduce((sum, entry) => sum + entry.learnedWordCount, 0);
+  uniqueInOrder(groupProgress.map(entry => entry.teachingMaterial)).forEach(teachingMaterial => {
+    const teachingMaterialGroups = groupProgress.filter(entry => entry.teachingMaterial === teachingMaterial);
+    const totalWords = teachingMaterialGroups.reduce((sum, entry) => sum + entry.wordCount, 0);
+    const totalLearned = teachingMaterialGroups.reduce((sum, entry) => sum + entry.learnedWordCount, 0);
 
     const card = document.createElement("div");
     card.className = "group-progress";
     card.innerHTML = `<div class="chart-head"><span class="chart-title"></span><span class="chart-readout"></span></div>
       <div class="segments"></div><ul class="segment-legend"></ul>`;
-    card.querySelector(".chart-title").textContent = language;
+    card.querySelector(".chart-title").textContent = teachingMaterial;
     card.querySelector(".chart-readout").textContent = `${totalLearned} von ${totalWords} gelernt`;
     const segments = card.querySelector(".segments");
     const legend = card.querySelector(".segment-legend");
@@ -1103,7 +1189,7 @@ function renderGroupProgress(groupProgress) {
       [...legend.children].forEach((row, i) => row.classList.toggle("selected", i === index));
     }
 
-    languageGroups.forEach((entry, index) => {
+    teachingMaterialGroups.forEach((entry, index) => {
       const segment = document.createElement("div");
       segment.className = "segment";
       segment.style.flexGrow = entry.wordCount;
