@@ -242,8 +242,9 @@
     <div class="stepbar"><button class="link" data-back="homeScreen">← Lehrmittel</button><span id="setupStepLabel"></span></div>
     <h1 id="setupTitle"></h1>
     <div class="setup">
-      <h2>Gruppe</h2>
+      <h2>Gruppen</h2>
       <div class="chips" id="groupChips"></div>
+      <button class="link" id="toggleAllGroups">Alle an/aus</button>
 
       <h2>Richtung</h2>
       <div class="chips" id="directionChips"></div>
@@ -443,7 +444,7 @@ const state = {
   level: null,
   teachingMaterial: null,
   teachingMaterialGrouping: "language",
-  group: null,
+  selectedGroups: [],         // several groups can be practised together (array, so it can be stored as JSON)
   direction: "foreign-de",
   mode: "flashcard",
   pool: "all",
@@ -483,14 +484,20 @@ function isLearned(word) {
   return (state.progressByWordId[word.id]?.streak || 0) >= state.streakNeededToCountAsLearned;
 }
 function wordsOfTeachingMaterial(name) { return state.allWords.filter(w => w.teachingMaterial === name); }
-function wordsOfGroup() { return wordsOfTeachingMaterial(state.teachingMaterial).filter(w => w.group === state.group); }
+function wordsOfSelectedGroups() { return wordsOfTeachingMaterial(state.teachingMaterial).filter(w => state.selectedGroups.includes(w.group)); }
 function currentTeachingMaterial() { return state.teachingMaterials.find(tm => tm.name === state.teachingMaterial) || null; }
 function currentLanguage() { return currentTeachingMaterial()?.language || ""; }
-function topicsOfGroup() { return [...new Set(wordsOfGroup().map(w => w.topic))]; }
-function hasRealTopics() { return topicsOfGroup().some(topic => topic !== ""); }
+// Topics across all selected groups; same-named topics (e.g. "Additional Words" in File 1 and 2) are one chip.
+function topicsOfSelectedGroups() {
+  // In group order (File 1's topics before File 2's), independent of the row order in the sheet.
+  const groupOrder = groupsOfTeachingMaterial(state.teachingMaterial);
+  const wordsInGroupOrder = [...wordsOfSelectedGroups()].sort((first, second) => groupOrder.indexOf(first.group) - groupOrder.indexOf(second.group));
+  return [...new Set(wordsInGroupOrder.map(w => w.topic))];
+}
+function hasRealTopics() { return topicsOfSelectedGroups().some(topic => topic !== ""); }
 function wordsInSelectedTopics() {
   // Groups without topics: the topic step only shows a summary, all words are used.
-  return hasRealTopics() ? wordsOfGroup().filter(w => state.selectedTopics.has(w.topic)) : wordsOfGroup();
+  return hasRealTopics() ? wordsOfSelectedGroups().filter(w => state.selectedTopics.has(w.topic)) : wordsOfSelectedGroups();
 }
 function uniqueInOrder(values) { return [...new Set(values)]; }
 function groupsOfTeachingMaterial(name) {
@@ -681,17 +688,19 @@ el("openStatisticsButton").onclick = renderStatisticsScreen;
    The last selection is remembered per profile in this browser.
    ===================================================================== */
 const SELECTION_STORAGE_PREFIX = "vokabeltrainer-auswahl-";
-const REMEMBERED_SELECTION_KEYS = ["level", "teachingMaterial", "teachingMaterialGrouping", "group", "direction", "mode", "pool"];
+const REMEMBERED_SELECTION_KEYS = ["level", "teachingMaterial", "teachingMaterialGrouping", "selectedGroups", "direction", "mode", "pool"];
 
 /* Start values, so a sibling logging in on the same device never inherits the previous selection. */
 const DEFAULT_SELECTION = { level: null, teachingMaterial: null, teachingMaterialGrouping: "language",
-  group: null, direction: "foreign-de", mode: "flashcard", pool: "all" };
+  selectedGroups: [], direction: "foreign-de", mode: "flashcard", pool: "all" };
 
 function restoreSelection() {
   Object.assign(state, DEFAULT_SELECTION);
   let rememberedSelection = {};
   try { rememberedSelection = JSON.parse(localStorage.getItem(SELECTION_STORAGE_PREFIX + state.profile.name)) || {}; } catch { /* none */ }
   REMEMBERED_SELECTION_KEYS.forEach(key => { if (rememberedSelection[key]) state[key] = rememberedSelection[key]; });
+  // Older versions remembered a single "group".
+  if (rememberedSelection.group && !rememberedSelection.selectedGroups) state.selectedGroups = [rememberedSelection.group];
   repairSelection(true);
 }
 
@@ -707,8 +716,11 @@ function repairSelection(resetTopics) {
   if (!levelNames.includes(state.level)) state.level = levelNames[0] || null;
   if (!currentTeachingMaterial()) { state.teachingMaterial = null; resetTopics = true; }
   const groupNames = state.teachingMaterial ? groupsOfTeachingMaterial(state.teachingMaterial) : [];
-  if (!groupNames.includes(state.group)) { state.group = groupNames[0] || null; resetTopics = true; }
-  if (resetTopics) state.selectedTopics = new Set(state.group ? topicsOfGroup() : []);
+  const validSelectedGroups = state.selectedGroups.filter(group => groupNames.includes(group));
+  if (validSelectedGroups.length !== state.selectedGroups.length || validSelectedGroups.length === 0) resetTopics = true;
+  // At least one group stays selected, so screen 2 never shows an empty round.
+  state.selectedGroups = validSelectedGroups.length ? validSelectedGroups : groupNames.slice(0, 1);
+  if (resetTopics) state.selectedTopics = new Set(topicsOfSelectedGroups());
 }
 
 function buildSingleChoiceChips(containerId, options, stateKey, onChange, extraClass = "") {
@@ -771,7 +783,7 @@ function renderTeachingMaterialCard() {
       meta.textContent = learnedLabel(wordsOfTeachingMaterial(tm.name));
       chip.appendChild(meta);
       chip.onclick = () => {
-        if (tm.name !== state.teachingMaterial) { state.teachingMaterial = tm.name; state.group = null; }
+        if (tm.name !== state.teachingMaterial) { state.teachingMaterial = tm.name; state.selectedGroups = []; }
         repairSelection(false);
         rememberSelection();
         renderSetupScreen();
@@ -796,7 +808,7 @@ function renderSetupCard() {
   const changeAndRerender = (resetTopics) => () => { repairSelection(resetTopics); rememberSelection(); renderSetupCard(); };
   const language = currentLanguage();
 
-  buildSingleChoiceChips("groupChips", groupsOfTeachingMaterial(state.teachingMaterial).map(group => [group, group]), "group", changeAndRerender(true));
+  renderGroupChips();
   buildSingleChoiceChips("directionChips", [
     ["foreign-de", `${language} → Deutsch`],
     ["de-foreign", `Deutsch → ${language}`],
@@ -819,9 +831,47 @@ function renderSetupCard() {
     `${learnedLabel(wordsInSelectedTopics())} · ${wordsForCurrentSelection().length} Wörter in dieser Runde`;
 }
 
+/* Groups: multi-select. Each chip shows learned / total of that group, so a
+   child sees at a glance where there is still work. Tapping toggles; the
+   last selected group can't be removed (an empty round makes no sense). */
+function renderGroupChips() {
+  const container = el("groupChips");
+  container.innerHTML = "";
+  groupsOfTeachingMaterial(state.teachingMaterial).forEach(group => {
+    const groupWords = wordsOfTeachingMaterial(state.teachingMaterial).filter(w => w.group === group);
+    const isSelected = state.selectedGroups.includes(group);
+    const chip = document.createElement("button");
+    chip.className = "chip" + (isSelected ? " on" : "");
+    chip.textContent = group + " ";
+    const countLabel = document.createElement("small");
+    countLabel.textContent = `${groupWords.filter(isLearned).length}/${groupWords.length}`;
+    chip.appendChild(countLabel);
+    chip.onclick = () => {
+      if (isSelected && state.selectedGroups.length === 1) return;
+      state.selectedGroups = isSelected
+        ? state.selectedGroups.filter(selectedGroup => selectedGroup !== group)
+        // Keep master-data order, so the stored selection is stable.
+        : groupsOfTeachingMaterial(state.teachingMaterial).filter(g => g === group || state.selectedGroups.includes(g));
+      repairSelection(true);
+      rememberSelection();
+      renderSetupCard();
+    };
+    container.appendChild(chip);
+  });
+}
+
+el("toggleAllGroups").onclick = () => {
+  const allGroups = groupsOfTeachingMaterial(state.teachingMaterial);
+  // All selected → back to the first one only; otherwise select all.
+  state.selectedGroups = state.selectedGroups.length === allGroups.length ? allGroups.slice(0, 1) : allGroups;
+  repairSelection(true);
+  rememberSelection();
+  renderSetupCard();
+};
+
 /* Topics: collapsed by default, the summary line says what is selected. */
 function renderTopicChips() {
-  const namedTopics = topicsOfGroup().filter(topic => topic !== "");
+  const namedTopics = topicsOfSelectedGroups().filter(topic => topic !== "");
   el("topicDetails").classList.toggle("hidden", namedTopics.length === 0);
   const selectedNamedTopicCount = namedTopics.filter(topic => state.selectedTopics.has(topic)).length;
   el("topicSummary").textContent = selectedNamedTopicCount === namedTopics.length
@@ -835,7 +885,7 @@ function renderTopicChips() {
     chip.className = "chip compact" + (state.selectedTopics.has(topic) ? " on" : "");
     chip.textContent = topic + " ";
     const countLabel = document.createElement("small");
-    countLabel.textContent = wordsOfGroup().filter(w => w.topic === topic).length;
+    countLabel.textContent = wordsOfSelectedGroups().filter(w => w.topic === topic).length;
     chip.appendChild(countLabel);
     chip.onclick = () => {
       state.selectedTopics.has(topic) ? state.selectedTopics.delete(topic) : state.selectedTopics.add(topic);
@@ -847,7 +897,7 @@ function renderTopicChips() {
 
 el("toggleAllTopics").onclick = () => {
   // Words without a topic count as their own (unnamed) topic, so they stay included.
-  const allTopics = topicsOfGroup();
+  const allTopics = topicsOfSelectedGroups();
   const allSelected = allTopics.every(topic => state.selectedTopics.has(topic));
   state.selectedTopics = allSelected ? new Set(allTopics.filter(topic => topic === "")) : new Set(allTopics);
   renderSetupCard();
