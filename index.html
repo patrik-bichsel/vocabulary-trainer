@@ -1033,19 +1033,127 @@ el("revealButton").onclick = () => {
 el("gradeRightButton").onclick = () => finishQuestion(true);
 el("gradeWrongButton").onclick = () => finishQuestion(false);
 
-/* --- Multiple choice: distractors from the same group/topic first, so it isn't too easy --- */
+/* =====================================================================
+   7b) MULTIPLE CHOICE: CHOOSING WRONG ANSWERS THAT LOOK RIGHT
+   A wrong answer is only useful if it can't be ruled out by its shape.
+   Example: for "Be careful!" the options "Kreis", "hübsch" are useless,
+   because only the right answer is an exclamation. So every candidate gets
+   points for looking like the right answer (same kind of text, same word
+   type, similar length, similar spelling, same topic). From the best few,
+   three are drawn at random, so rounds don't repeat exactly.
+   ===================================================================== */
+const DISTRACTOR_COUNT = 3;
+const DISTRACTOR_SHORTLIST_SIZE = 6;
+const DISTRACTOR_POINTS = { sameShape: 5, sameShapeFamily: 3, sameWordType: 2, similarWordCount: 2, similarLength: 1.5, similarSpelling: 1.5,
+  sameTopic: 1, sameGroup: 0.5 };
+const NOUN_ARTICLE_PATTERN = /^(un|une|le|la|les|l'|des|the|a|an|ein|eine|einen|der|die|das|mein|meine|ma|mon|mes)\s/i;
+
+/* The core of an answer without hints in parentheses: "gut (I'm …)" → "gut". */
+function answerCore(text) {
+  return text.replace(/\([^)]*\)/g, "").replace(/[.!?…]+$/g, "").trim().toLowerCase();
+}
+
+/* What kind of text it is – a child can see this at a glance. */
+function textShape(text) {
+  // Hints in parentheses ("gut (I'm … , thanks.)") are not part of what the child compares.
+  const trimmed = text.replace(/\([^)]*\)/g, "").trim();
+  if (/^\d+$/.test(trimmed)) return "number";  // "30 (dreissig)" only next to other numbers
+  if (trimmed.endsWith("?")) return "question";
+  if (trimmed.endsWith("!")) return "exclamation";
+  if (/\.$/.test(trimmed) && trimmed.split(/\s+/).length > 1) return "sentence";
+  if (trimmed.includes("…")) return "open phrase";
+  return "word";
+}
+
+/* Sentences of any kind are closer to each other than to single words. */
+const SENTENCE_LIKE_SHAPES = ["question", "exclamation", "sentence", "open phrase"];
+function shapeFamily(shape) { return SENTENCE_LIKE_SHAPES.includes(shape) ? "sentence-like" : shape; }
+
+/* Rough word type from the surface: article in front, or German capitalised noun. */
+function looksLikeNoun(text, side) {
+  const core = text.replace(/\([^)]*\)/g, "").trim();
+  if (NOUN_ARTICLE_PATTERN.test(core)) return true;
+  // German nouns start with a capital letter; one capitalised word without punctuation is almost always a noun.
+  return side === "german" && /^[A-ZÄÖÜ]/.test(core) && core.split(/\s+/).length <= 2 && !/[.!?]$/.test(core);
+}
+
+function wordCountOf(text) { return answerCore(text).split(/\s+/).filter(Boolean).length; }
+
+/* 1 = equal, 0 = completely different (normalised Levenshtein distance). */
+function spellingSimilarity(first, second) {
+  const a = answerCore(first), b = answerCore(second);
+  if (!a.length || !b.length) return 0;
+  let previousRow = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i++) {
+    const currentRow = [i];
+    for (let j = 1; j <= b.length; j++) {
+      currentRow[j] = Math.min(previousRow[j] + 1, currentRow[j - 1] + 1, previousRow[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    previousRow = currentRow;
+  }
+  return 1 - previousRow[b.length] / Math.max(a.length, b.length);
+}
+
+function ratioSimilarity(first, second) { return Math.min(first, second) / Math.max(first, second, 1); }
+
+function distractorScore(word, candidate, answerSide) {
+  const answerText = word[answerSide], candidateText = candidate[answerSide];
+  let score = 0;
+  const answerShape = textShape(answerText), candidateShape = textShape(candidateText);
+  if (answerShape === candidateShape) score += DISTRACTOR_POINTS.sameShape;
+  else if (shapeFamily(answerShape) === shapeFamily(candidateShape)) score += DISTRACTOR_POINTS.sameShapeFamily;
+  if (looksLikeNoun(answerText, answerSide) === looksLikeNoun(candidateText, answerSide)) score += DISTRACTOR_POINTS.sameWordType;
+  score += DISTRACTOR_POINTS.similarWordCount * ratioSimilarity(wordCountOf(answerText), wordCountOf(candidateText));
+  score += DISTRACTOR_POINTS.similarLength * ratioSimilarity(answerCore(answerText).length, answerCore(candidateText).length);
+  // Look-alike spelling (bag/bad) only when the foreign word is the answer – that trains exact reading.
+  if (answerSide === "foreign") score += DISTRACTOR_POINTS.similarSpelling * spellingSimilarity(answerText, candidateText);
+  if (candidate.topic && candidate.topic === word.topic) score += DISTRACTOR_POINTS.sameTopic;
+  if (candidate.group === word.group) score += DISTRACTOR_POINTS.sameGroup;
+  return score;
+}
+
+/* Main meanings of a German translation, by their last word:
+   "jdn./etw. lieben; jdn./etw. mögen" → {lieben, mögen}. Two words sharing one
+   (aimer / adorer, "eine Mutter" / "meine Mutter") would both look right. */
+function germanMeaningKeys(germanText) {
+  return new Set(germanText.split(/[;,/]/)
+    .map(meaning => meaning.replace(/\([^)]*\)/g, "").replace(/[.!?…]/g, "").trim().toLowerCase().split(/\s+/).pop() || "")
+    .filter(lastWord => lastWord.length >= 3));
+}
+
+function sharesMeaning(firstGerman, secondGerman) {
+  const firstKeys = germanMeaningKeys(firstGerman);
+  return [...germanMeaningKeys(secondGerman)].some(key => firstKeys.has(key));
+}
+
+/* Returns the wrong answers as texts. Pure function of its inputs, so it can be tested. */
+function chooseDistractors(word, answerSide, allWords) {
+  const promptSide = answerSide === "german" ? "foreign" : "german";
+  const isAlsoCorrect = candidate =>
+    // Same meaning ("gut (I'm …)" vs "gut (Very …)") or same prompt ("cook" verb vs "cook" job) → would be a second right answer.
+    answerCore(candidate[answerSide]) === answerCore(word[answerSide]) ||
+    answerCore(candidate[promptSide]) === answerCore(word[promptSide]) ||
+    sharesMeaning(candidate.german, word.german);
+
+  // Same teaching material first; other books of the language only if it is too small.
+  const sameTeachingMaterial = allWords.filter(w => w.teachingMaterial === word.teachingMaterial && w.id !== word.id && !isAlsoCorrect(w));
+  const candidatePool = sameTeachingMaterial.length >= DISTRACTOR_SHORTLIST_SIZE ? sameTeachingMaterial
+    : allWords.filter(w => w.language === word.language && w.id !== word.id && !isAlsoCorrect(w));
+
+  const seenTexts = new Set();
+  const shortlist = candidatePool
+    .map(candidate => ({ text: candidate[answerSide], score: distractorScore(word, candidate, answerSide) + Math.random() * 0.01 }))
+    .sort((first, second) => second.score - first.score)
+    .filter(entry => !seenTexts.has(entry.text) && seenTexts.add(entry.text))
+    .slice(0, DISTRACTOR_SHORTLIST_SIZE);
+  return shuffled(shortlist).slice(0, DISTRACTOR_COUNT).map(entry => entry.text);
+}
+
+/* --- Multiple choice: right answer + three look-alike wrong answers (see 7b) --- */
 function renderChoices() {
   const { word, direction } = currentQuestion();
   const answerSide = direction === "foreign-de" ? "german" : "foreign";
-  const sameLanguage = state.allWords.filter(w => w.language === word.language && w.id !== word.id);
-  // Prefer distractors from the same teaching material, then group, then topic.
-  const closeness = w => (w.teachingMaterial === word.teachingMaterial ? 4 : 0) + (w.group === word.group ? 2 : 0) + (w.topic === word.topic ? 1 : 0);
-  // Shuffle first, then stable-sort by closeness: closest words win, ties stay random.
-  const distractors = shuffled(sameLanguage)
-    .sort((a, b) => closeness(b) - closeness(a))
-    .map(w => w[answerSide])
-    .filter((text, index, list) => text !== word[answerSide] && list.indexOf(text) === index)
-    .slice(0, 3);
+  const distractors = chooseDistractors(word, answerSide, state.allWords);
 
   const container = el("choiceControls");
   container.innerHTML = "";
